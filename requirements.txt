@@ -3,3 +3,4 @@ sentence-transformers
 transformers
 nltk
 matplotlib
+torch
