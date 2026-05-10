@@ -1,8 +1,10 @@
 """
 Minimal LoCoMo evaluation example for an agent memory framework.
 
-This is a starting point — replace `SimpleMemory` with your real memory module
-and keep the rest of the eval loop.
+Memory is page-cache style: a fixed-size LFU "hot" list of frequently-relevant
+turns is always included in context, plus top-K retrieval over the remaining
+("cold") turns. Each query bumps the frequency of every page in the top-(hot+K)
+most relevant for that query; eviction removes the page with lowest frequency.
 
 Setup:
   1. pip install nano-vllm sentence-transformers numpy tqdm transformers nltk
@@ -20,7 +22,7 @@ import json
 import os
 import re
 import string
-from collections import Counter
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -35,20 +37,22 @@ from tqdm import tqdm
 LOCOMO_PATH = os.getenv("LOCOMO_PATH", "locomo/data/locomo10.json")
 MODEL       = os.getenv("MODEL", "Qwen/Qwen3-4B")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "BAAI/bge-small-en-v1.5")
-TOP_K       = 8
+TOP_K       = 14
+HOT_SIZE    = 4
 MAX_TOKENS  = 256
 
-pipe     = pipeline("text-generation", model=MODEL, device="mps")
+pipe     = pipeline("text-generation", model=MODEL, device="cuda:0")
 embedder = SentenceTransformer(EMBED_MODEL)
 
 
-# ---------- Memory: a minimal vector store ----------
-# Replace this whole class with your framework's memory module.
-class SimpleMemory:
+# ---------- Memory: page-cache style with LFU hot list ----------
+class LFUMemory:
     def __init__(self) -> None:
         self.texts: list[str] = []
         self.metas: list[dict[str, Any]] = []
         self.vecs: np.ndarray | None = None
+        self.hot: OrderedDict[str, dict[str, Any]] = OrderedDict()
+        self.freq: Counter = Counter()
 
     def write(self, text: str, meta: dict[str, Any]) -> None:
         self.texts.append(text)
@@ -56,20 +60,43 @@ class SimpleMemory:
         v = embedder.encode([text], normalize_embeddings=True)
         self.vecs = v if self.vecs is None else np.vstack([self.vecs, v])
 
-    def recall(self, query: str, k: int = TOP_K) -> list[dict[str, Any]]:
-        if self.vecs is None or not self.texts:
+    def recall(self, query: str, k: int = TOP_K, hot_size: int = HOT_SIZE) -> list[dict[str, Any]]:
+        if self.vecs is None:
             return []
+        hot_hits = list(self.hot.values())
+        hot_dids = set(self.hot.keys())
+
+        # Score all pages, then bump freq for the top-(hot_size+k) most relevant.
+        # Hot pages that stay relevant accumulate freq; stale ones don't.
         q = embedder.encode([query], normalize_embeddings=True)[0]
         scores = self.vecs @ q
+        for i in np.argsort(-scores)[:hot_size + k]:
+            self.freq[self.metas[i]["dia_id"]] += 1
+
+        # Take top-k from cold pages (mask hot, which is already in context).
+        for i, m in enumerate(self.metas):
+            if m["dia_id"] in hot_dids:
+                scores[i] = -np.inf
         top = np.argsort(-scores)[:k]
-        return [{"text": self.texts[i], "meta": self.metas[i], "score": float(scores[i])}
-                for i in top]
+        cold_hits = [
+            {"text": self.texts[i], "meta": self.metas[i], "score": float(scores[i])}
+            for i in top if np.isfinite(scores[i])
+        ]
+
+        # Admit cold hits; evict min-freq when over capacity.
+        # OrderedDict iteration order makes min() pick the oldest insertion as tiebreak.
+        for hit in cold_hits:
+            self.hot[hit["meta"]["dia_id"]] = hit
+            while len(self.hot) > hot_size:
+                evict = min(self.hot, key=lambda d: self.freq[d])
+                del self.hot[evict]
+
+        return hot_hits + cold_hits
 
 
 # ---------- Conversation -> memory ----------
-def ingest_conversation(memory: SimpleMemory, sample: dict[str, Any]) -> None:
-    """Walk each session in chronological order and write each turn to memory.
-    A real memory framework would also summarize, consolidate, prune, etc."""
+def ingest_conversation(memory: LFUMemory, sample: dict[str, Any]) -> None:
+    """Walk each session in chronological order and write each turn to memory."""
     conv = sample["conversation"]
     session_keys = sorted(
         (k for k in conv if k.startswith("session_") and not k.endswith("_date_time")),
@@ -92,7 +119,7 @@ ANSWER_SYSTEM = (
     "If the answer is not present, say \"I don't know\"."
 )
 
-def answer(memory: SimpleMemory, question: str) -> dict[str, Any]:
+def answer(memory: LFUMemory, question: str) -> dict[str, Any]:
     hits = memory.recall(question, k=TOP_K)
     context = "\n".join(f"- {h['text']}" for h in hits)
     messages = [
@@ -173,7 +200,7 @@ def retrieval_recall(retrieved_metas: list[dict[str, Any]], evidence_ids: list[s
 def evaluate(samples: list[dict[str, Any]], n_conversations: int = 1) -> list[dict[str, Any]]:
     results = []
     for sample in samples[:n_conversations]:
-        memory = SimpleMemory()
+        memory = LFUMemory()
         ingest_conversation(memory, sample)
 
         for qa in tqdm(sample["qa"], desc=f"QA on {sample['sample_id']}"):
@@ -219,6 +246,6 @@ def evaluate(samples: list[dict[str, Any]], n_conversations: int = 1) -> list[di
 
 if __name__ == "__main__":
     data = json.loads(Path(LOCOMO_PATH).read_text())
-    results = evaluate(data, n_conversations=1)  # start with 1, scale up later
+    results = evaluate(data, n_conversations=10)  # start with 1, scale up later
     Path("results.json").write_text(json.dumps(results, indent=2))
     print(f"\nWrote {len(results)} results to results.json")
