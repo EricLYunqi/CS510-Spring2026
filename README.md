@@ -18,3 +18,10 @@ Before you start, make sure to have a `.env` file which includes the Azure endpo
 - Kimi-K2.5
 
 Dependenices are in `requirements.txt`, platform is RHEL and CUDA 12.8.
+
+Also please git clone the benchmark:
+```bash
+https://github.com/snap-research/locomo.git
+```
+
+And create a `results` dir with the same layout in this repo. Currently it's only for demo does not contain the full evaluation results.
