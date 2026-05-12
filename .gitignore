@@ -1,2 +1,7 @@
 locomo/
 .DS_Store
+.env
+results/
+results_*
+run_all_api.sh
+

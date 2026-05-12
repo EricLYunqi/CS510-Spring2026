@@ -120,18 +120,33 @@ def _plot_session_hits(session_hits: Counter):
 
 
 def _plot_turn_hits(turn_hits: Counter):
-    per_conv: dict[str, Counter] = defaultdict(Counter)
-    for (sid, dia_id), n in turn_hits.items():
-        per_conv[sid][dia_id] = n
+    counts = np.array(sorted(turn_hits.values(), reverse=True), dtype=float)
+    ranks  = np.arange(1, len(counts) + 1)
 
-    fig, ax = plt.subplots(figsize=(24, 6))
-    _grouped_bar(ax, per_conv, lambda d: d)
-    ax.set_ylabel("Retrieval hits")
-    ax.set_title(f"Top-{_TOP_N} turn retrieval hits per conversation")
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+
+    axes[0].plot(ranks, counts, ".", markersize=2)
+    axes[0].set_xlabel("Rank"); axes[0].set_ylabel("Retrieval hits")
+    axes[0].set_title("Linear–Linear")
+
+    axes[1].plot(ranks, counts, ".", markersize=2)
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel("Rank (log)"); axes[1].set_ylabel("Retrieval hits")
+    axes[1].set_title("Log–Linear")
+
+    axes[2].plot(ranks, counts, ".", markersize=2)
+    axes[2].set_xscale("log"); axes[2].set_yscale("log")
+    axes[2].set_xlabel("Rank (log)"); axes[2].set_ylabel("Retrieval hits (log)")
+    axes[2].set_title("Log–Log")
+
+    for ax in axes:
+        ax.grid(True, which="both", ls="--", alpha=0.35)
+
+    fig.suptitle(f"Turn retrieval hits — Rank–Frequency (N={len(counts)} turns)", y=1.02)
     fig.tight_layout()
-    fig.savefig("./results/prelim/conversation_hits.png", dpi=150, bbox_inches="tight")
+    fig.savefig("./results/prelim/turn_hits_zipf.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-    print("Saved conversation_hits.png")
+    print("Saved turn_hits_zipf.png")
 
 
 def _plot_all_session_hits(session_hits: Counter):
@@ -169,17 +184,14 @@ def _plot_all_turn_hits(turn_hits: Counter):
     out_dir.mkdir(exist_ok=True)
 
     for sid, counter in per_conv.items():
-        ordered = counter.most_common()
-        labels = [d for d, _ in ordered]
-        counts = [n for _, n in ordered]
+        counts = np.array(sorted(counter.values(), reverse=True), dtype=float)
+        ranks  = np.arange(1, len(counts) + 1)
 
-        fig, ax = plt.subplots(figsize=(6, max(4, len(labels) * 0.22)))
-        ax.barh(range(len(labels)), counts, align="center")
-        ax.set_yticks(range(len(labels)))
-        ax.set_yticklabels(labels, fontsize=6)
-        ax.invert_yaxis()
-        ax.set_xlabel("Retrieval hits")
-        ax.set_title(f"Turn hits — {sid}")
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.loglog(ranks, counts, "o-", markersize=4, linewidth=1)
+        ax.set_xlabel("Rank"); ax.set_ylabel("Retrieval hits")
+        ax.set_title(f"Turn hits — {sid} (log–log)")
+        ax.grid(True, which="both", ls="--", alpha=0.35)
         fig.tight_layout()
         fig.savefig(out_dir / f"{sid}.png", dpi=150, bbox_inches="tight")
         plt.close(fig)

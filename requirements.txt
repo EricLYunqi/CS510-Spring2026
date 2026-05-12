@@ -4,3 +4,5 @@ transformers
 nltk
 matplotlib
 torch
+anthropic
+python-dotenv
